@@ -64,7 +64,7 @@ export function sourceTopic(msg) {
 // 并发安全：用原子认领避免为同一来源话题重复创建备份话题。
 export async function ensureBackupTopic(bot, db, sourceChatId, src) {
   if (!src) return { backupThreadId: null, name: null };
-  const targetChat = await getBackupChatId(db, config.backupChannelId);
+  const targetChat = await getBackupChatId(db);
   if (!targetChat) {
     return { backupThreadId: null, name: src.name || `话题 #${src.threadId}` };
   }
@@ -118,7 +118,7 @@ async function handleTopicService(bot, ctx) {
 
   if (db) {
     await upsertSourceTopic(db, ctx.chat.id, src.threadId, src.name);
-    if (await getBackupChatId(db, config.backupChannelId)) {
+    if (await getBackupChatId(db)) {
       await ensureBackupTopic(bot, db, ctx.chat.id, src);
     }
   }
@@ -138,7 +138,7 @@ export async function handleBackup(bot, ctx) {
   }
 
   const db = ctx.env?.DB;
-  const targetChat = db ? await getBackupChatId(db, config.backupChannelId || null) : config.backupChannelId;
+  const targetChat = db ? await getBackupChatId(db) : null;
   if (!targetChat) {
     await ctx.reply('⚠️ 还没有设置备份群/频道。\n\n请管理员使用：/setbackup -100xxxxxxxxxx\n也可以把备份频道的一条消息转发给我，再回复它发送 /setbackup。');
     return;

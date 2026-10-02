@@ -69,7 +69,10 @@ export async function startCommand(ctx) {
     `/topics — 话题列表\n` +
     `/search 关键词 — 搜索备份\n` +
     `/restore <ID> — 重新发送一份备份\n` +
-    `/cleanup <天数> — 清理 N 天前的索引\n    `/setbackup <Chat ID> — 设置备份群/频道\n` +    `/backup — 查看当前备份目标\n` +    `/clearbackup — 清除机器人内的备份设置\n` +
+    `/cleanup <天数> — 清理 N 天前的索引\n` +
+    `/setbackup <Chat ID> — 设置备份群/频道\n` +
+    `/backup — 查看当前备份目标\n` +
+    `/clearbackup — 清除机器人内的备份设置\n` +
     `/help — 帮助`
   );
 }

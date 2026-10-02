@@ -54,3 +54,20 @@
 
 - 备份采用 Telegram 消息复制机制，文件不经过 Worker 下载，速度快且不占 Worker 体积。
 - `/cleanup` 只清理索引记录，不会删除备份频道中的消息。
+
+## 测试
+
+```bash
+npm install      # 含测试依赖 better-sqlite3
+npm test         # node --test test/
+```
+
+测试用 better-sqlite3 内存库模拟 D1，覆盖：话题创建/复用/改名同步/并发认领、服务消息处理、文件去重、权限校验、DB 层 CRUD 与迁移顺序。
+
+## 迁移
+
+- `migrations/0001_init.sql`：基础表
+- `migrations/0002_topics.sql`：话题字段 + topics 映射表（增量，仅运行一次）
+
+`npm run db:apply` 会依次执行两个迁移。已有数据库只需补跑 0002。
+

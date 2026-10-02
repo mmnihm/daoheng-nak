@@ -1,12 +1,13 @@
 import { createBot } from './bot.js';
 import { initDb } from './db.js';
-import { config } from './config.js';
+import { loadConfig, config } from './config.js';
 import { log } from './logger.js';
 
 // Cloudflare Workers 入口：处理 Webhook + 初始化 D1。
 export default {
   async fetch(request, env, ctx) {
     globalThis.__BOT_ENV__ = env;
+    loadConfig(env);
     const url = new URL(request.url);
 
     // 健康检查
@@ -38,6 +39,7 @@ export default {
 // 本地 node 入口（仅用于调试，Workers 环境不会执行）。
 if (typeof process !== 'undefined' && !globalThis.__BOT_ENV__) {
   globalThis.__BOT_ENV__ = process.env;
+  loadConfig(process.env);
   if (config.botToken) {
     const bot = createBot();
     bot.start();

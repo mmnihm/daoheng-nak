@@ -152,7 +152,7 @@ export async function upsertSourceTopic(db, sourceChatId, sourceThreadId, name) 
     .run();
 }
 
-// 写入备份频道对应话题的 thread id
+// 写入备份频道对应话题的 thread id（无条件更新）
 export async function setBackupTopic(db, sourceChatId, sourceThreadId, backupThreadId, backupTopicId) {
   const now = new Date().toISOString();
   await db
@@ -161,6 +161,21 @@ export async function setBackupTopic(db, sourceChatId, sourceThreadId, backupThr
     )
     .bind(backupThreadId, backupTopicId, now, sourceChatId, sourceThreadId)
     .run();
+}
+
+// 原子认领：仅当该来源话题尚未绑定备份话题时写入，返回是否认领成功。
+// 用于避免并发 webhook 为同一新话题重复创建备份话题。
+export async function claimBackupTopic(db, sourceChatId, sourceThreadId, backupThreadId) {
+  const now = new Date().toISOString();
+  const r = await db
+    .prepare(
+      `UPDATE topics
+       SET backup_thread_id=?, backup_topic_id=?, updated_at=?
+       WHERE source_chat_id=? AND source_thread_id=? AND backup_thread_id IS NULL`
+    )
+    .bind(backupThreadId, backupThreadId, now, sourceChatId, sourceThreadId)
+    .run();
+  return (r.meta?.changes || 0) > 0;
 }
 
 // 列出所有话题及备份计数

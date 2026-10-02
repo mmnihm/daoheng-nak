@@ -2,7 +2,7 @@
 import { config, isAllowed } from '../config.js';
 import {
   insertBackup, newId, findByFileUnique,
-  getTopicMapping, upsertSourceTopic, setBackupTopic,
+  getTopicMapping, upsertSourceTopic, claimBackupTopic,
 } from '../db.js';
 import { log } from '../logger.js';
 
@@ -46,7 +46,7 @@ export function formatSize(bytes) {
 }
 
 // 来源话题信息：thread id 与（若可得）话题名
-function sourceTopic(msg) {
+export function sourceTopic(msg) {
   const threadId = msg.message_thread_id;
   if (threadId == null) return null;
   // forum_topic_created / forum_topic_edited 服务消息自带话题名
@@ -61,37 +61,50 @@ function sourceTopic(msg) {
 
 // 确保备份频道中存在对应话题，返回 { backupThreadId, name }。
 // 备份频道必须是开启了话题的超级群，否则回落为不分话题。
-async function ensureBackupTopic(bot, db, sourceChatId, src) {
+// 并发安全：用原子认领避免为同一来源话题重复创建备份话题。
+export async function ensureBackupTopic(bot, db, sourceChatId, src) {
   if (!src) return { backupThreadId: null, name: null };
   const targetChat = config.backupChannelId;
-
-  const existing = await getTopicMapping(db, sourceChatId, src.threadId);
-  const knownName = existing?.topic_name || src.name;
-  const fallbackName = `话题 #${src.threadId}`;
-  const name = knownName || fallbackName;
-
-  if (existing?.backup_thread_id) {
-    // 若来源话题名更新了，尝试同步更新备份话题名（best-effort）
-    if (src.name && existing.topic_name !== src.name) {
-      try { await bot.api.editForumTopic(targetChat, existing.backup_thread_id, { name: src.name }); }
-      catch (e) { log('TOPIC', `更新备份话题名失败：${e.message}`); }
-    }
-    return { backupThreadId: existing.backup_thread_id, name: existing.topic_name || name };
+  if (!targetChat) {
+    return { backupThreadId: null, name: src.name || `话题 #${src.threadId}` };
   }
 
-  // 备份频道未开启话题时，回落为不分话题归档
-  if (!targetChat) return { backupThreadId: null, name };
+  const existing = await getTopicMapping(db, sourceChatId, src.threadId);
+  let name;
+  if (existing) {
+    name = existing.topic_name || src.name || `话题 #${src.threadId}`;
+    if (existing.backup_thread_id != null) {
+      // 若来源话题名更新了，尝试同步更新备份话题名（best-effort）
+      if (src.name && existing.topic_name !== src.name) {
+        try { await bot.api.editForumTopic(targetChat, existing.backup_thread_id, { name: src.name }); }
+        catch (e) { log('TOPIC', `更新备份话题名失败：${e.message}`); }
+        await upsertSourceTopic(db, sourceChatId, src.threadId, src.name);
+      }
+      // 用最新名（同步后的来源名）而非旧快照
+      const effectiveName = src.name || existing.topic_name || name;
+      return { backupThreadId: existing.backup_thread_id, name: effectiveName };
+    }
+  } else {
+    name = src.name || `话题 #${src.threadId}`;
+    await upsertSourceTopic(db, sourceChatId, src.threadId, name);
+  }
 
+  // 创建备份话题；并发时用原子认领避免重复
   try {
     const created = await bot.api.createForumTopic(targetChat, name);
-    const backupThreadId = created.message_thread_id;
-    await setBackupTopic(db, sourceChatId, src.threadId, backupThreadId, backupThreadId);
-    log('TOPIC', `创建备份话题「${name}」`, { backupThreadId });
-    return { backupThreadId, name };
+    const newThreadId = created.message_thread_id;
+ const claimed = await claimBackupTopic(db, sourceChatId, src.threadId, newThreadId);
+    if (!claimed) {
+      // 认领失败：另一并发请求已创建，删除本次重复创建的话题
+      try { await bot.api.deleteForumTopic(targetChat, newThreadId); }
+      catch (e) { log('TOPIC', `删除重复话题失败：${e.message}`); }
+      const winner = await getTopicMapping(db, sourceChatId, src.threadId);
+      return { backupThreadId: winner?.backup_thread_id ?? null, name: winner?.topic_name || name };
+    }
+    log('TOPIC', `创建备份话题「${name}」`, { backupThreadId: newThreadId });
+    return { backupThreadId: newThreadId, name };
   } catch (e) {
     log('TOPIC', `创建备份话题失败（备份频道可能未开启话题）：${e.message}`);
-    // 标记来源话题名，但不绑定备份话题
-    await upsertSourceTopic(db, sourceChatId, src.threadId, name);
     return { backupThreadId: null, name };
   }
 }
@@ -127,13 +140,13 @@ export async function handleBackup(bot, ctx) {
   const db = ctx.env?.DB;
   const targetChat = config.backupChannelId || ctx.chat.id;
 
-  // 话题服务消息：登记话题名 + 预建备份话题
-  if (msg.forum_topic_created || (msg.forum_topic_edited && msg.forum_topic_edited.name)) {
+  // 话题服务消息（创建 / 改名）：登记话题名 + 预建备份话题，然后结束（不作为内容归档）
+  if (msg.forum_topic_created || msg.forum_topic_edited) {
     const handled = await handleTopicService(bot, ctx);
     if (handled) {
       await ctx.reply(`🧵 话题已登记：${sourceTopic(msg).name}`);
-      return;
     }
+    return;
   }
 
   const srcTopic = sourceTopic(msg);
@@ -163,7 +176,7 @@ export async function handleBackup(bot, ctx) {
   // 复制消息到备份频道（保留原始文件，不经过 Worker 下载）。
   let copied;
   try {
-    const opts = backupThreadId ? { message_thread_id: backupThreadId } : {};
+    const opts = backupThreadId != null ? { message_thread_id: backupThreadId } : {};
     copied = await bot.api.copyMessage(targetChat, ctx.chat.id, msg.message_id, opts);
   } catch (e) {
     log('BACKUP', `复制到备份频道失败：${e.message}`, { targetChat });

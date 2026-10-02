@@ -1,6 +1,6 @@
 // 命令处理：统计、列表、搜索、恢复、清理、话题、帮助。
 import { config, isAllowed } from '../config.js';
-import { listRecent, searchBackups, getBackupById, stats, cleanupOld, listTopics } from '../db.js';
+import { listRecent, searchBackups, getBackupById, stats, cleanupOld, listTopics, getBackupChatId, setSetting, deleteSetting } from '../db.js';
 import { formatSize } from '../services/backup.js';
 
 function gate(ctx) {
@@ -8,6 +8,55 @@ function gate(ctx) {
     return ctx.reply(`⛔ 无权限\n\n你的 Telegram ID：${ctx.from?.id}\n请把这个 ID 加入 Cloudflare 的 ADMIN_IDS。`);
   }
   return null;
+}
+
+export async function setBackupCommand(ctx) {
+  if (await gate(ctx)) return;
+  const db = ctx.env?.DB;
+  if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
+
+  let raw = String(ctx.match || '').trim();
+  let chatId = null;
+  const replied = ctx.message?.reply_to_message;
+  const origin = replied?.forward_origin;
+
+  if (!raw && origin?.type === 'channel' && origin.chat?.id) {
+    chatId = Number(origin.chat.id);
+  } else if (raw) {
+    chatId = Number(raw);
+  }
+
+  if (!Number.isSafeInteger(chatId)) {
+    return ctx.reply(
+      '⚙️ 设置备份群/频道\n\n' +
+      '方式一：/setbackup -100xxxxxxxxxx\n' +
+      '方式二：把备份频道的一条消息转发给我，再回复这条转发消息发送 /setbackup。'
+    );
+  }
+
+  await setSetting(db, 'backup_chat_id', chatId);
+  await ctx.reply(`✅ 备份目标已设置\n\n📦 Chat ID：${chatId}\n\n以后收到的文件会自动备份到这里。`);
+}
+
+export async function backupCommand(ctx) {
+  if (await gate(ctx)) return;
+  const db = ctx.env?.DB;
+  if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
+  const chatId = await getBackupChatId(db, config.backupChannelId);
+  if (!chatId) return ctx.reply('📦 当前还没有设置备份群/频道。\n\n使用 /setbackup 设置。');
+  await ctx.reply(`📦 当前备份目标\n\nChat ID：${chatId}`);
+}
+
+export async function clearBackupCommand(ctx) {
+  if (await gate(ctx)) return;
+  const db = ctx.env?.DB;
+  if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
+  await deleteSetting(db, 'backup_chat_id');
+  if (config.backupChannelId) {
+    await ctx.reply(`✅ 已清除机器人内设置。\n当前会回退使用 Cloudflare 的 BACKUP_CHANNEL_ID：${config.backupChannelId}`);
+  } else {
+    await ctx.reply('✅ 已清除备份目标。\n\n请重新使用 /setbackup 设置。');
+  }
 }
 
 export async function startCommand(ctx) {
@@ -20,7 +69,7 @@ export async function startCommand(ctx) {
     `/topics — 话题列表\n` +
     `/search 关键词 — 搜索备份\n` +
     `/restore <ID> — 重新发送一份备份\n` +
-    `/cleanup <天数> — 清理 N 天前的索引\n` +
+    `/cleanup <天数> — 清理 N 天前的索引\n    `/setbackup <Chat ID> — 设置备份群/频道\n` +    `/backup — 查看当前备份目标\n` +    `/clearbackup — 清除机器人内的备份设置\n` +
     `/help — 帮助`
   );
 }

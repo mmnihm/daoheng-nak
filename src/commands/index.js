@@ -1,6 +1,6 @@
-// 命令处理：统计、列表、搜索、恢复、清理、帮助。
+// 命令处理：统计、列表、搜索、恢复、清理、话题、帮助。
 import { config, isAllowed } from '../config.js';
-import { listRecent, searchBackups, getBackupById, stats, cleanupOld } from '../db.js';
+import { listRecent, searchBackups, getBackupById, stats, cleanupOld, listTopics } from '../db.js';
 import { formatSize } from '../services/backup.js';
 
 function gate(ctx) {
@@ -13,10 +13,11 @@ function gate(ctx) {
 export async function startCommand(ctx) {
   await ctx.reply(
     `🗄️ 备份机器人\n\n` +
-    `把文件、图片、视频、语音或文字直接发给我，我会自动归档到备份频道并建立索引。\n\n` +
+    `把文件、图片、视频、语音或文字直接发给我，我会自动归档到备份频道并建立索引。话题（论坛 Topic）消息会归档到备份频道里对应的话题中。\n\n` +
     `可用命令：\n` +
     `/stats — 备份统计\n` +
     `/list — 最近备份\n` +
+    `/topics — 话题列表\n` +
     `/search 关键词 — 搜索备份\n` +
     `/restore <ID> — 重新发送一份备份\n` +
     `/cleanup <天数> — 清理 N 天前的索引\n` +
@@ -38,6 +39,7 @@ export async function statsCommand(ctx) {
     `📊 备份统计\n\n` +
     `总数：${s.total}\n` +
     `总大小：${formatSize(s.totalSize)}\n` +
+    `话题数：${s.topics}\n` +
     `最早：${s.oldest ? s.oldest.replace('T', ' ').slice(0, 19) : '—'}\n` +
     `最近：${s.newest ? s.newest.replace('T', ' ').slice(0, 19) : '—'}\n\n` +
     `按类型：\n${lines}`
@@ -52,6 +54,19 @@ export async function listCommand(ctx) {
   if (!rows.length) return ctx.reply('📭 还没有任何备份。');
   const text = rows.map(r => brief(r)).join('\n');
   await ctx.reply(`🗂️ 最近备份（${rows.length}）\n\n${text}`);
+}
+
+export async function topicsCommand(ctx) {
+  if (await gate(ctx)) return;
+  const db = ctx.env?.DB;
+  if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
+  const rows = (await listTopics(db))?.results || [];
+  if (!rows.length) return ctx.reply('🧵 还没有任何话题记录。');
+  const text = rows.map(t =>
+    `• ${t.topic_name || `话题 #${t.source_thread_id}`}${t.backup_thread_id ? '' : '（未映射）'} — ${t.count} 条` +
+    (t.last_at ? ` · ${(t.last_at).replace('T', ' ').slice(0, 16)}` : '')
+  ).join('\n');
+  await ctx.reply(`🧵 话题（${rows.length}）\n\n${text}`);
 }
 
 export async function searchCommand(ctx) {
@@ -94,6 +109,7 @@ export async function cleanupCommand(ctx) {
 function brief(r) {
   const name = r.file_name || r.caption || r.type;
   const sz = r.file_size ? ` · ${formatSize(r.file_size)}` : '';
+  const tp = r.topic_name ? ` [${r.topic_name}]` : '';
   const t = (r.created_at || '').replace('T', ' ').slice(0, 16);
-  return `• [${r.id}] ${name}${sz} — ${t}`;
+  return `• [${r.id}] ${name}${sz}${tp} — ${t}`;
 }

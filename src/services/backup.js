@@ -1,6 +1,9 @@
-// 核心备份逻辑：从入站消息提取文件信息，复制到备份频道，并写入 D1 索引。
+// 核心备份逻辑：从入站消息提取文件信息，复制到备份频道（保留话题结构），并写入 D1 索引。
 import { config, isAllowed } from '../config.js';
-import { insertBackup, newId, findByFileUnique } from '../db.js';
+import {
+  insertBackup, newId, findByFileUnique,
+  getTopicMapping, upsertSourceTopic, setBackupTopic,
+} from '../db.js';
 import { log } from '../logger.js';
 
 // 从 Telegram 消息中提取文件元数据。
@@ -42,7 +45,75 @@ export function formatSize(bytes) {
   return `${(bytes / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
 }
 
-// 处理一条入站消息：复制到备份频道并索引。
+// 来源话题信息：thread id 与（若可得）话题名
+function sourceTopic(msg) {
+  const threadId = msg.message_thread_id;
+  if (threadId == null) return null;
+  // forum_topic_created / forum_topic_edited 服务消息自带话题名
+  if (msg.forum_topic_created) {
+    return { threadId, name: msg.forum_topic_created.name || null };
+  }
+  if (msg.forum_topic_edited && msg.forum_topic_edited.name) {
+    return { threadId, name: msg.forum_topic_edited.name };
+  }
+  return { threadId, name: null };
+}
+
+// 确保备份频道中存在对应话题，返回 { backupThreadId, name }。
+// 备份频道必须是开启了话题的超级群，否则回落为不分话题。
+async function ensureBackupTopic(bot, db, sourceChatId, src) {
+  if (!src) return { backupThreadId: null, name: null };
+  const targetChat = config.backupChannelId;
+
+  const existing = await getTopicMapping(db, sourceChatId, src.threadId);
+  const knownName = existing?.topic_name || src.name;
+  const fallbackName = `话题 #${src.threadId}`;
+  const name = knownName || fallbackName;
+
+  if (existing?.backup_thread_id) {
+    // 若来源话题名更新了，尝试同步更新备份话题名（best-effort）
+    if (src.name && existing.topic_name !== src.name) {
+      try { await bot.api.editForumTopic(targetChat, existing.backup_thread_id, { name: src.name }); }
+      catch (e) { log('TOPIC', `更新备份话题名失败：${e.message}`); }
+    }
+    return { backupThreadId: existing.backup_thread_id, name: existing.topic_name || name };
+  }
+
+  // 备份频道未开启话题时，回落为不分话题归档
+  if (!targetChat) return { backupThreadId: null, name };
+
+  try {
+    const created = await bot.api.createForumTopic(targetChat, name);
+    const backupThreadId = created.message_thread_id;
+    await setBackupTopic(db, sourceChatId, src.threadId, backupThreadId, backupThreadId);
+    log('TOPIC', `创建备份话题「${name}」`, { backupThreadId });
+    return { backupThreadId, name };
+  } catch (e) {
+    log('TOPIC', `创建备份话题失败（备份频道可能未开启话题）：${e.message}`);
+    // 标记来源话题名，但不绑定备份话题
+    await upsertSourceTopic(db, sourceChatId, src.threadId, name);
+    return { backupThreadId: null, name };
+  }
+}
+
+// 处理话题创建/改名服务消息：登记来源话题名，并预建备份话题。
+async function handleTopicService(bot, ctx) {
+  const msg = ctx.message;
+  const db = ctx.env?.DB;
+  const src = sourceTopic(msg);
+  if (!src || !src.name) return false;
+
+  if (db) {
+    await upsertSourceTopic(db, ctx.chat.id, src.threadId, src.name);
+    if (config.backupChannelId) {
+      await ensureBackupTopic(bot, db, ctx.chat.id, src);
+    }
+  }
+  log('TOPIC', `话题服务消息：${src.name}`, { threadId: src.threadId });
+  return true;
+}
+
+// 处理一条入站消息：复制到备份频道（保留话题）并索引。
 export async function handleBackup(bot, ctx) {
   const msg = ctx.message;
   if (!msg) return;
@@ -53,13 +124,34 @@ export async function handleBackup(bot, ctx) {
     return;
   }
 
+  const db = ctx.env?.DB;
   const targetChat = config.backupChannelId || ctx.chat.id;
+
+  // 话题服务消息：登记话题名 + 预建备份话题
+  if (msg.forum_topic_created || (msg.forum_topic_edited && msg.forum_topic_edited.name)) {
+    const handled = await handleTopicService(bot, ctx);
+    if (handled) {
+      await ctx.reply(`🧵 话题已登记：${sourceTopic(msg).name}`);
+      return;
+    }
+  }
+
+  const srcTopic = sourceTopic(msg);
+  let backupThreadId = null;
+  let topicName = null;
+  if (srcTopic && db && config.backupChannelId) {
+    const t = await ensureBackupTopic(bot, db, ctx.chat.id, srcTopic);
+    backupThreadId = t.backupThreadId;
+    topicName = t.name;
+  } else if (srcTopic) {
+    topicName = srcTopic.name || (db ? (await getTopicMapping(db, ctx.chat.id, srcTopic.threadId))?.topic_name : null) || `话题 #${srcTopic.threadId}`;
+  }
+
   const fileInfo = extractFile(msg);
   const caption = msg.caption || msg.text || '';
-  const type = fileInfo ? fileInfo.type : msg.text ? 'text' : 'unknown';
+  const type = fileInfo ? fileInfo.type : msg.text ? 'text' : msg.forum_topic_created ? 'topic_created' : 'unknown';
 
   // 去重：同一文件在备份频道已存在则跳过复制，仅提示。
-  const db = ctx.env?.DB;
   if (db && fileInfo?.fileUniqueId) {
     const dup = await findByFileUnique(db, targetChat, fileInfo.fileUniqueId);
     if (dup) {
@@ -71,7 +163,8 @@ export async function handleBackup(bot, ctx) {
   // 复制消息到备份频道（保留原始文件，不经过 Worker 下载）。
   let copied;
   try {
-    copied = await bot.api.copyMessage(targetChat, ctx.chat.id, msg.message_id);
+    const opts = backupThreadId ? { message_thread_id: backupThreadId } : {};
+    copied = await bot.api.copyMessage(targetChat, ctx.chat.id, msg.message_id, opts);
   } catch (e) {
     log('BACKUP', `复制到备份频道失败：${e.message}`, { targetChat });
     await ctx.reply(`❌ 备份失败：${e.message}`);
@@ -82,8 +175,10 @@ export async function handleBackup(bot, ctx) {
     id: newId(),
     backup_chat_id: targetChat,
     backup_message_id: copied.message_id,
+    backup_thread_id: backupThreadId,
     source_chat_id: ctx.chat.id,
     source_message_id: msg.message_id,
+    source_thread_id: srcTopic?.threadId || null,
     sender_id: userId || null,
     sender_name: senderName(ctx.from),
     type,
@@ -92,6 +187,7 @@ export async function handleBackup(bot, ctx) {
     mime_type: fileInfo?.mimeType || null,
     file_size: fileInfo?.fileSize || null,
     caption: caption || null,
+    topic_name: topicName || null,
     created_at: new Date().toISOString(),
   };
 
@@ -104,12 +200,13 @@ export async function handleBackup(bot, ctx) {
   }
 
   const sizeStr = fileInfo?.fileSize ? ` | ${formatSize(fileInfo.fileSize)}` : '';
+  const topicStr = topicName ? `\n🧵 话题：${topicName}` : '';
   await ctx.reply(
     `✅ 已备份\n\n` +
     `📦 ID：${row.id}\n` +
-    `🏷️ 类型：${type}${fileInfo?.fileName ? `\n📄 文件：${fileInfo.fileName}` : ''}${sizeStr}\n` +
+    `🏷️ 类型：${type}${fileInfo?.fileName ? `\n📄 文件：${fileInfo.fileName}` : ''}${sizeStr}${topicStr}\n` +
     `👤 来自：${row.sender_name}\n` +
     `🕐 时间：${row.created_at.replace('T', ' ').slice(0, 19)}`
   );
-  log('BACKUP', `归档 ${type} 来自 ${row.sender_name}`, { id: row.id });
+  log('BACKUP', `归档 ${type} 来自 ${row.sender_name}`, { id: row.id, topic: topicName });
 }

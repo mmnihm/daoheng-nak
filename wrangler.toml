@@ -6,4 +6,4 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "telegram-backup-bot-db"
-database_id = "在这里填入你的 D1 数据库 ID"
+database_id = "0c464c6c-b2e1-4cdf-b034-c2d93d611c83"

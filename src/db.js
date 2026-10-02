@@ -30,6 +30,15 @@ export async function initDb(env) {
     .run();
   await db
     .prepare(
+      `CREATE TABLE IF NOT EXISTS bot_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TEXT NOT NULL
+      )`
+    )
+    .run();
+  await db
+    .prepare(
       `CREATE TABLE IF NOT EXISTS topics (
         source_chat_id INTEGER NOT NULL,
         source_thread_id INTEGER NOT NULL,
@@ -49,6 +58,34 @@ export async function initDb(env) {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_backups_thread ON backups(source_thread_id)').run();
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_topics_backup ON topics(backup_thread_id)').run();
   return db;
+}
+
+export async function getSetting(db, key) {
+  if (!db) return null;
+  const row = await db.prepare('SELECT value FROM bot_settings WHERE key=? LIMIT 1').bind(key).first();
+  return row?.value ?? null;
+}
+
+export async function setSetting(db, key, value) {
+  if (!db) return false;
+  await db.prepare(
+    `INSERT INTO bot_settings (key, value, updated_at) VALUES (?,?,?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+  ).bind(key, String(value), new Date().toISOString()).run();
+  return true;
+}
+
+export async function deleteSetting(db, key) {
+  if (!db) return false;
+  await db.prepare('DELETE FROM bot_settings WHERE key=?').bind(key).run();
+  return true;
+}
+
+export async function getBackupChatId(db, fallback = null) {
+  const value = await getSetting(db, 'backup_chat_id');
+  if (value == null || value === '') return fallback;
+  const id = Number(value);
+  return Number.isSafeInteger(id) ? id : fallback;
 }
 
 export function newId() {

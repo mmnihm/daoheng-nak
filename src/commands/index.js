@@ -42,7 +42,7 @@ export async function backupCommand(ctx) {
   if (await gate(ctx)) return;
   const db = ctx.env?.DB;
   if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
-  const chatId = await getBackupChatId(db, config.backupChannelId);
+  const chatId = await getBackupChatId(db);
   if (!chatId) return ctx.reply('📦 当前还没有设置备份群/频道。\n\n使用 /setbackup 设置。');
   await ctx.reply(`📦 当前备份目标\n\nChat ID：${chatId}`);
 }
@@ -52,11 +52,7 @@ export async function clearBackupCommand(ctx) {
   const db = ctx.env?.DB;
   if (!db) return ctx.reply('⚠️ 未配置 D1 数据库。');
   await deleteSetting(db, 'backup_chat_id');
-  if (config.backupChannelId) {
-    await ctx.reply(`✅ 已清除机器人内设置。\n当前会回退使用 Cloudflare 的 BACKUP_CHANNEL_ID：${config.backupChannelId}`);
-  } else {
-    await ctx.reply('✅ 已清除备份目标。\n\n请重新使用 /setbackup 设置。');
-  }
+  await ctx.reply('✅ 已清除备份目标。\n\n请重新使用 /setbackup 设置。');
 }
 
 export async function startCommand(ctx) {

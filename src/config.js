@@ -14,14 +14,12 @@ function parseIds(raw) {
 export const config = {
   botToken: '',
   adminIds: [],
-  backupChannelId: null,
   retentionDays: 0,
 };
 
 export function loadConfig(e = globalThis.__BOT_ENV__ || (typeof process !== 'undefined' ? process.env : {})) {
   config.botToken = e.BOT_TOKEN || '';
   config.adminIds = parseIds(e.ADMIN_IDS);
-  config.backupChannelId = e.BACKUP_CHANNEL_ID ? Number(e.BACKUP_CHANNEL_ID) : null;
   config.retentionDays = Math.max(0, Number(e.RETENTION_DAYS) || 0);
   return config;
 }

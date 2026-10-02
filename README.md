@@ -20,7 +20,7 @@
 2. 在 Worker Secrets/Variables 设置：
    - `BOT_TOKEN`：Telegram Bot Token（必须用 Secret）
    - `ADMIN_IDS`：管理员 Numeric User ID，多个用英文逗号分隔
-   - `BACKUP_CHANNEL_ID`：备份频道/群 Chat ID，机器人需为该频道管理员；**如需按话题归档，备份群需开启「话题」功能**
+   - 备份群/频道不需要写入环境变量；管理员在机器人中使用 `/setbackup` 设置，配置保存在 D1；机器人需为该频道管理员；**如需按话题归档，备份群需开启「话题」功能**
    - `RETENTION_DAYS`（可选）：保留天数，用于 `/cleanup`
 3. `npm install && npm run deploy`
 4. 建表：`npm run db:apply`
@@ -42,6 +42,9 @@
 | `/search 关键词` | 搜索备份 |
 | `/restore <ID>` | 重新发送一份备份 |
 | `/cleanup <天数>` | 清理 N 天前的索引 |
+| `/setbackup <Chat ID>` | 设置备份群/频道 |
+| `/backup` | 查看当前备份目标 |
+| `/clearbackup` | 清除备份目标 |
 
 ## 话题说明
 
